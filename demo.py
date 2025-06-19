@@ -10,13 +10,13 @@ from torch.utils.data import Dataset, DataLoader,Subset
 import torch.optim as optim
 import os
 
-
+from tqdm import tqdm 
 
 class FusionDataset(Dataset):
-    def __init__(self, resentinel_files, remodis_files, landsat_files):
-        self.resentinel_files = resentinel_files
-        self.remodis_files = remodis_files
-        self.landsat_files = landsat_files
+    def __init__(self, dst_files, reori_files, dummy_files):
+        self.dst_files = dst_files
+        self.reori_files = reori_files
+        self.dummy_files = dummy_files
 
     def split_image_into_patches(self, image, patch_size=(256, 256), overlap=0):
         """
@@ -114,18 +114,18 @@ class FusionDataset(Dataset):
         return merged_image
 
     def __len__(self):
-        return len(self.landsat_files)
+        return len(self.dst_files)
     
     def __getitem__(self, idx):
-        with rasterio.open(self.resentinel_files[idx]) as resentinel, \
-            rasterio.open(self.remodis_files[idx]) as remodis, \
-            rasterio.open(self.landsat_files[idx]) as landsat:
+        with rasterio.open(self.dst_files[idx]) as dst, \
+            rasterio.open(self.reori_files[idx]) as reori, \
+            rasterio.open(self.dummy_files[idx]) as dummy:
 
-            resentinel_tensor = torch.from_numpy(np.nan_to_num(resentinel.read(), nan=0.0)).float()
-            remodis_tensor = torch.from_numpy(np.nan_to_num(remodis.read(), nan=0.0)).float()
-            landsat_tensor = torch.from_numpy(np.nan_to_num(landsat.read(), nan=0.0)).float()
+            dst_tensor = torch.from_numpy(np.nan_to_num(dst.read(), nan=0.0)).float()
+            reori_tensor = torch.from_numpy(np.nan_to_num(reori.read(), nan=0.0)).float()
+            dummy_tensor = torch.from_numpy(np.nan_to_num(dummy.read(), nan=0.0)).float()
 
-        return resentinel_tensor, remodis_tensor, landsat_tensor
+        return dst_tensor, reori_tensor, dummy_tensor
 
 def _make_pair(value):
     if isinstance(value, int):
@@ -342,23 +342,33 @@ def get_sorted_files(folder_path):
     files.sort()
     return [os.path.join(folder_path, f) for f in files]
 
-def resample_files(sentinel_files, modis_files):
-    # 打开并处理每一对文件
-    for file1, file2 in zip(sentinel_files, modis_files):
+def resample_files(sentinel_files, modis_files, output_folder):
+    # 确保输出文件夹存在
+    os.makedirs(output_folder, exist_ok=True)
+
+    for file1, file2 in tqdm(zip(sentinel_files, modis_files), 
+                             total=min(len(sentinel_files), len(modis_files)), 
+                             desc="Resampling Files", unit="file"):
         with rasterio.open(file1) as dataset1, rasterio.open(file2) as dataset2:
-            #img1 = dataset1.read()  # 读取第一个波段
-            # 获取目标文件的属性
+            # 获取目标 CRS、变换和尺寸
             dst_crs = dataset1.crs
             dst_transform = dataset1.transform
             dst_width = dataset1.width
             dst_height = dataset1.height
 
-            # 计算重投影和重采样的转换
+            # 计算变换参数
             transform, width, height = calculate_default_transform(
-            dataset2.crs, dst_crs, dataset2.width, dataset2.height, *dataset2.bounds,
-            dst_width=dst_width, dst_height=dst_height)
+                dataset2.crs, dst_crs, dataset2.width, dataset2.height,
+                *dataset2.bounds,
+                dst_width=dst_width,
+                dst_height=dst_height
+            )
 
-            # 准备写入新的重采样后的文件
+            # 构建输出文件路径
+            base_name = os.path.basename(file2)
+            output_path = os.path.join(output_folder, base_name)
+
+            # 更新元数据
             kwargs = dataset2.meta.copy()
             kwargs.update({
                 'crs': dst_crs,
@@ -367,7 +377,8 @@ def resample_files(sentinel_files, modis_files):
                 'height': dst_height
             })
 
-            with rasterio.open(f're_{file2}', 'w', **kwargs) as dst:
+            # 创建并写入新文件
+            with rasterio.open(output_path, 'w', **kwargs) as dst:
                 for i in range(1, dataset2.count + 1):
                     reproject(
                         source=rasterio.band(dataset2, i),
@@ -376,18 +387,37 @@ def resample_files(sentinel_files, modis_files):
                         src_crs=dataset2.crs,
                         dst_transform=transform,
                         dst_crs=dst_crs,
-                        resampling=Resampling.nearest)
+                        resampling=Resampling.nearest
+                    )
 
-if __name__ == '__main__':
-    landsat_files = get_sorted_files('Landsat')
-    resentinel_files = get_sorted_files('re_Sentinel')
-    remodis_files = get_sorted_files('re_MODIS')
+def main(choice, dst_path, ori_path, ori_path2, output_path, patch_size, overlap, EPOCHS, train_num):
+    os.makedirs(f'{output_path}/{dst_path}', exist_ok=True)
+
+    dst_files = get_sorted_files(dst_path)
+    ori_files = get_sorted_files(ori_path)
+
+    resample_files(dst_files, ori_files,f"re_{ori_path}_2_{dst_path}")
+
+    reori_files = get_sorted_files(f"re_{ori_path}_2_{dst_path}")
+
+    if choice == 'modis sentinel -> landsat':
+
+        ori_files2 = get_sorted_files(ori_path2)
+
+        resample_files(dst_files, ori_files2,f"re_{ori_path2}_2_{dst_path}")
+
+        reori_files2 = get_sorted_files(f"re_{ori_path2}_2_{dst_path}")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = FusionDataset(resentinel_files, remodis_files, landsat_files)
+    if choice == 'modis sentinel -> landsat':
+        dataset = FusionDataset(dst_files, reori_files, reori_files2)
+    else:
+         dataset = FusionDataset(dst_files, reori_files, reori_files)
+
     # 假设你想用前4个样本作为训练集，其余的作为测试集
-    train_indices = list(range(6))  # 前4个样本
-    test_indices = list(range(6, len(dataset)))  # 其余样本
+    train_indices = list(range(train_num))  # 前4个样本
+    test_indices = list(range(train_num, len(dataset)))  # 其余样本
 
     train_dataset = Subset(dataset, train_indices)
     test_dataset = Subset(dataset, test_indices)
@@ -401,48 +431,78 @@ if __name__ == '__main__':
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
-    patch_size = (256, 256)
-    overlap = 32
-
-    EPOCHS = 101
-    for epoch in range(1, EPOCHS):
+    for epoch in range(1, EPOCHS + 1):
         model.train()
-        for i, (resentinel_tensor, remodis_tensor, landsat_tensor) in enumerate(train_loader):
-            # 现在两张图像尺寸相同，可以沿某个维度拼接了，例如沿通道维度
-            concatenated_images = torch.cat((resentinel_tensor, remodis_tensor), dim=1).to(device)
+        
+        # 使用 tqdm 包裹 dataloader，并设置描述信息
+        loop = tqdm(enumerate(zip(train_loader, dst_files)), 
+                    total=len(train_loader), 
+                    desc=f"Epoch [{epoch}/{EPOCHS}]",
+                    leave=True)
 
-            # 步骤 1: 裁剪
+        for i, ((dst_tensor, reori_tensor, dummy_tensor), file_path) in loop:
+            # 现在两张图像尺寸相同，可以沿通道维度拼接了，例如沿通道维度
+            if choice == 'modis sentinel -> landsat':
+                concatenated_images = torch.cat((reori_tensor, dummy_tensor), dim=1).to(device)
+            else:
+                concatenated_images = torch.cat((dst_tensor, reori_tensor), dim=1).to(device)
+
+            # 步骤 1: 裁剪成 patch
             patches, positions = dataset.split_image_into_patches(concatenated_images, patch_size, overlap)
             
             optimizer.zero_grad()
             
             output_image = model(patches)
 
-            # 步骤 3: 合并
+            # 步骤 3: 合并 patch
             final_image = dataset.merge_predictions(output_image, positions, concatenated_images.shape)
 
+            # 可视化或保存第2个 epoch 的图像
             if epoch == 100:
-            # 1. 提取图像（假设批次大小为1）
-                img_single = concatenated_images[0, 0, :, :].detach().cpu().numpy()  # 将张量转换为numpy数组并移到CPU
+                img_single = concatenated_images[0, 0, :, :].detach().cpu().numpy()
 
-                # 使用 Matplotlib 显示图像
-                plt.figure(figsize=(10, 10))
-                plt.imshow(img_single, cmap='gray')  # 'gray' cmap用于单通道图像
-                plt.axis('off')  # 关闭坐标轴
-                plt.savefig(f'model/B{i}.png', bbox_inches='tight', pad_inches=0)
+                with rasterio.open(file_path) as src:
+                    meta = src.meta.copy()
 
+                output_file = f'{output_path}/{file_path}'
+                with rasterio.open(output_file, 'w', **meta) as dst:
+                    dst.write(img_single, 1)
 
             # 计算损失
-            loss = criterion(final_image, landsat_tensor.to(device))
+            loss = criterion(final_image, dst_tensor.to(device))
             
             # 反向传播和优化
             loss.backward()
             optimizer.step()
             
+            # 更新进度条上的信息
             if i % 10 == 0:
-                print(f"Epoch [{epoch}/{EPOCHS}], Step [{i}/{len(train_loader)}], Loss: {loss.item():.4f}")
+                loop.set_postfix(loss=loss.item())
 
     # # 或者仅保存模型的状态字典
     # torch.save(model.state_dict(), 'model_state_dict.pth')
 
+
+if __name__ == '__main__':
+    # landsat modis -> landsat
+    # sentinel landsat -> sentinel
+    # modis sentinel -> landsat
+    choice = 'landsat modis -> landsat'
+
+    dst_path = 'L0315'
+    ori_path = 'MODIS0315'
+    ori_path2 = 'Sentinel'
+
+    output_path = 'output'
+
+    patch_size = (1024, 1024)
+    overlap = 0
+
+    EPOCHS = 101
+
+    train_num = 6
+
+    main(choice, dst_path, ori_path, ori_path2, output_path, patch_size, overlap, EPOCHS, train_num)
+
+    
     
