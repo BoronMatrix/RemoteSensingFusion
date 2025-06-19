@@ -459,7 +459,7 @@ def main(choice, dst_path, ori_path, ori_path2, output_path, patch_size, overlap
 
             # 可视化或保存第2个 epoch 的图像
             if epoch == 100:
-                img_single = concatenated_images[0, 0, :, :].detach().cpu().numpy()
+                img_single = final_image[0, 0, :, :].detach().cpu().numpy()
 
                 with rasterio.open(file_path) as src:
                     meta = src.meta.copy()
