@@ -146,7 +146,8 @@ def conv_layer(in_channels,
                      out_channels,
                      kernel_size,
                      padding=padding,
-                     bias=bias)
+                     bias=bias,
+                     padding_mode='reflect')
 
 def activation(act_type, inplace=True, neg_slope=0.05, n_prelu=1):
     """
@@ -260,7 +261,7 @@ class UNetImageFusionSingleChannel(nn.Module):
         
         # 初始卷积层和Leaky ReLU激活
         self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.LeakyReLU(inplace=True)
         )
 
@@ -290,12 +291,12 @@ class UNetImageFusionSingleChannel(nn.Module):
         self.up3 = nn.ConvTranspose2d(in_channels, in_channels, 2, 2)
         self.srlf7 = SRLFB(in_channels)
 
-        self.conv2 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, padding_mode='reflect')
 
         self.conv3 = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, padding_mode='reflect'),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, padding_mode='reflect')
         )
 
 
@@ -446,7 +447,7 @@ def main(choice, dst_path, ori_path, ori_path2, output_path, patch_size, overlap
                 concatenated_images = torch.cat((reori_tensor, dummy_tensor), dim=1).to(device)
             else:
                 concatenated_images = torch.cat((dst_tensor, reori_tensor), dim=1).to(device)
-
+            
             # 步骤 1: 裁剪成 patch
             patches, positions = dataset.split_image_into_patches(concatenated_images, patch_size, overlap)
             
@@ -454,11 +455,16 @@ def main(choice, dst_path, ori_path, ori_path2, output_path, patch_size, overlap
             
             output_image = model(patches)
 
+            # single_image_tensor = output_image.cpu().detach().numpy()[0, 0, :, :]
+            # plt.imshow(single_image_tensor)
+            # plt.axis('off')  # 不显示坐标轴
+            # plt.show()
+
             # 步骤 3: 合并 patch
             final_image = dataset.merge_predictions(output_image, positions, concatenated_images.shape)
 
             # 可视化或保存第2个 epoch 的图像
-            if epoch == 100:
+            if epoch % 10 == 0:
                 img_single = final_image[0, 0, :, :].detach().cpu().numpy()
 
                 with rasterio.open(file_path) as src:
@@ -489,8 +495,7 @@ if __name__ == '__main__':
     # modis sentinel -> landsat
     choice = 'landsat modis -> landsat'
 
-    dst_path = 'L0315'
-    ori_path = 'MODIS0315'
+
     ori_path2 = 'Sentinel'
 
     output_path = 'output'
@@ -502,7 +507,9 @@ if __name__ == '__main__':
 
     train_num = 6
 
-    main(choice, dst_path, ori_path, ori_path2, output_path, patch_size, overlap, EPOCHS, train_num)
+    for i , j in zip(['0619/Landsat/L0315'], 
+                     ['0619/MODIS/MODIS0315']):
+        main(choice, i, j, ori_path2, output_path, patch_size, overlap, EPOCHS, train_num)
 
     
     
